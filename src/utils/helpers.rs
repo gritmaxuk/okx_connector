@@ -1,50 +1,66 @@
-use serde_json::Value;
-use std::error::Error;
-use crate::models::Orderbook;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-pub fn parse_order_book(data: &str) -> Result<Orderbook, Box<dyn Error>> {
-    let v: Value = serde_json::from_str(data)?;
-    
-    // Check if the data field is present and is an array
-    let data_array = v["data"].as_array().ok_or("Missing or invalid 'data' field")?;
-    
-    // Get the first element of the data array
-    let first_data = data_array.get(0).ok_or("Empty 'data' array")?;
-    
-    // Extract asks and bids
-    let asks = first_data["asks"].as_array().ok_or("Missing or invalid 'asks' field")?;
-    let bids = first_data["bids"].as_array().ok_or("Missing or invalid 'bids' field")?;
-    
-    // Construct the orderbook
-    let orderbook = Orderbook {
-        asks: parse_orders(asks)?,
-        bids: parse_orders(bids)?,
-    };
-    
-    Ok(orderbook)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Orderbook {
+    pub asks: Vec<(f64, f64)>,
+    pub bids: Vec<(f64, f64)>,
 }
 
-fn parse_orders(orders: &[Value]) -> Result<Vec<(f64, f64)>, Box<dyn Error>> {
-    orders
-        .iter()
-        .map(|order| {
-            let price = order[0].as_str().ok_or("Invalid price")?.parse::<f64>()?;
-            let amount = order[1].as_str().ok_or("Invalid amount")?.parse::<f64>()?;
-            Ok((price, amount))
+#[derive(Debug, Serialize, Deserialize)]
+struct OrderbookResponse {
+    code: String,
+    msg: String,
+    data: Vec<OrderbookData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OrderbookData {
+    asks: Vec<[String; 2]>,
+    bids: Vec<[String; 2]>,
+    ts: String,
+}
+
+#[derive(Error, Debug)]
+pub enum OrderbookError {
+    #[error("JSON parsing error: {0}")]
+    JsonParseError(#[from] serde_json::Error),
+    #[error("Float parsing error: {0}")]
+    FloatParseError(#[from] std::num::ParseFloatError),
+    #[error("Missing or invalid data: {0}")]
+    InvalidData(String),
+}
+
+pub fn parse_order_book(data: &str) -> Result<Orderbook, OrderbookError> {
+    let response: OrderbookResponse = serde_json::from_str(data)?;
+    
+    let orderbook_data = response.data.get(0)
+        .ok_or_else(|| OrderbookError::InvalidData("Empty 'data' array".into()))?;
+    
+    Ok(Orderbook {
+        asks: parse_orders(&orderbook_data.asks)?,
+        bids: parse_orders(&orderbook_data.bids)?,
+    })
+}
+
+fn parse_orders(orders: &[[String; 2]]) -> Result<Vec<(f64, f64)>, OrderbookError> {
+    orders.iter()
+        .map(|[price, amount]| {
+            Ok((price.parse::<f64>()?, amount.parse::<f64>()?))
         })
         .collect()
 }
 
-pub fn validate_order_book_data(data: &str) -> Result<(), Box<dyn Error>> {
-    let v: Value = serde_json::from_str(data)?;
+pub fn validate_order_book_data(data: &str) -> Result<(), OrderbookError> {
+    let v: serde_json::Value = serde_json::from_str(data)?;
     
     if !v.is_object() {
-        return Err("Data is not a valid JSON object".into());
+        return Err(OrderbookError::InvalidData("Data is not a valid JSON object".into()));
     }
     
     let obj = v.as_object().unwrap();
     if !obj.contains_key("asks") || !obj.contains_key("bids") {
-        return Err("Missing required fields: 'asks' or 'bids'".into());
+        return Err(OrderbookError::InvalidData("Missing required fields: 'asks' or 'bids'".into()));
     }
     
     Ok(())
@@ -70,7 +86,6 @@ mod tests {
     fn test_validate_order_book_data() {
         let valid_data = r#"{"asks":[["41006.8","0.60030921"]],"bids":[["41006.3","0.30178210"]],"ts":"1621447077008"}"#;
         let invalid_data = r#"{"ask":[["41006.8","0.60030921"]],"bids":[["41006.3","0.30178210"]],"ts":"1621447077008"}"#;
-
         assert!(validate_order_book_data(valid_data).is_ok(), "Valid data failed validation");
         assert!(validate_order_book_data(invalid_data).is_err(), "Invalid data passed validation");
     }

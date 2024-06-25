@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use futures_util::{SinkExt, StreamExt};
+use thiserror::Error;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SubscribeMessage {
@@ -12,7 +13,16 @@ struct SubscribeMessage {
 #[derive(Debug, Serialize, Deserialize)]
 struct SubscribeArgs {
     channel: String,
-    instId: String,
+    #[serde(rename = "instId")]
+    inst_id: String,
+}
+
+#[derive(Error, Debug)]
+pub enum OKXWebSocketError {
+    #[error("WebSocket error: {0}")]
+    WebSocketError(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("JSON serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
 }
 
 pub struct OKXWebSocketClient {
@@ -26,52 +36,85 @@ impl OKXWebSocketClient {
         }
     }
 
-    pub async fn subscribe_to_order_book(&self, symbol: &str, tx: mpsc::Sender<String>) {
-        let (ws_stream, _) = connect_async(&self.url)
-            .await
-            .expect("Failed to connect");
+    pub async fn subscribe_to_order_book(
+        &self,
+        symbol: &str,
+        tx: mpsc::Sender<String>,
+    ) -> Result<(), OKXWebSocketError> {
+        let (ws_stream, _) = connect_async(&self.url).await?;
         println!("WebSocket handshake has been successfully completed");
 
+        let (mut write, mut read) = ws_stream.split();
+
+        self.send_subscribe_message(&mut write, symbol).await?;
+
+        self.handle_messages(read, write, tx).await
+    }
+
+    async fn send_subscribe_message(
+        &self,
+        write: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+            >,
+            Message,
+        >,
+        symbol: &str,
+    ) -> Result<(), OKXWebSocketError> {
         let subscribe_message = SubscribeMessage {
             op: "subscribe".to_string(),
             args: vec![SubscribeArgs {
                 channel: "books".to_string(),
-                instId: symbol.to_string(),
+                inst_id: symbol.to_string(),
             }],
         };
+        let msg = serde_json::to_string(&subscribe_message)?;
+        write.send(Message::Text(msg)).await?;
+        Ok(())
+    }
 
-        let msg = serde_json::to_string(&subscribe_message).unwrap();
-        let (mut write, mut read) = ws_stream.split();
-
-        write.send(Message::Text(msg)).await.unwrap();
-
+    async fn handle_messages(
+        &self,
+        mut read: futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+            >,
+        >,
+        mut write: futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+            >,
+            Message,
+        >,
+        tx: mpsc::Sender<String>,
+    ) -> Result<(), OKXWebSocketError> {
         while let Some(message) = read.next().await {
-            match message {
-                Ok(Message::Text(text)) => {
-                    tx.send(text).await.unwrap();
+            match message? {
+                Message::Text(text) => {
+                    if let Err(_) = tx.send(text).await {
+                        println!("Failed to send message through channel");
+                        break;
+                    }
                 }
-                Ok(Message::Binary(data)) => {
+                Message::Binary(data) => {
                     println!("Received binary data: {} bytes", data.len());
                 }
-                Ok(Message::Ping(data)) => {
+                Message::Ping(data) => {
                     println!("Received ping");
-                    write.send(Message::Pong(data)).await.unwrap();
+                    write.send(Message::Pong(data)).await?;
                 }
-                Ok(Message::Pong(_)) => {
+                Message::Pong(_) => {
                     println!("Received pong");
                 }
-                Ok(Message::Close(frame)) => {
+                Message::Close(frame) => {
                     println!("WebSocket connection closed: {:?}", frame);
                     break;
                 }
-                Ok(Message::Frame(frame)) => {
+                Message::Frame(frame) => {
                     println!("Received raw frame: {:?}", frame);
-                }
-                Err(e) => {
-                    eprintln!("Error receiving message: {:?}", e);
-                    break;
                 }
             }
         }
+        Ok(())
     }
 }
