@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use url::Url;
+use futures_util::{SinkExt, StreamExt};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SubscribeMessage {
@@ -27,7 +27,7 @@ impl OKXWebSocketClient {
     }
 
     pub async fn subscribe_to_order_book(&self, symbol: &str, tx: mpsc::Sender<String>) {
-        let (ws_stream, _) = connect_async(Url::parse(&self.url).unwrap())
+        let (ws_stream, _) = connect_async(&self.url)
             .await
             .expect("Failed to connect");
         println!("WebSocket handshake has been successfully completed");
@@ -50,10 +50,22 @@ impl OKXWebSocketClient {
                 Ok(Message::Text(text)) => {
                     tx.send(text).await.unwrap();
                 }
-                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => (),
-                Ok(Message::Close(_)) => {
-                    println!("WebSocket connection closed");
+                Ok(Message::Binary(data)) => {
+                    println!("Received binary data: {} bytes", data.len());
+                }
+                Ok(Message::Ping(data)) => {
+                    println!("Received ping");
+                    write.send(Message::Pong(data)).await.unwrap();
+                }
+                Ok(Message::Pong(_)) => {
+                    println!("Received pong");
+                }
+                Ok(Message::Close(frame)) => {
+                    println!("WebSocket connection closed: {:?}", frame);
                     break;
+                }
+                Ok(Message::Frame(frame)) => {
+                    println!("Received raw frame: {:?}", frame);
                 }
                 Err(e) => {
                     eprintln!("Error receiving message: {:?}", e);
