@@ -21,3 +21,21 @@ impl OKXRestClient {
         Orderbook::from_snapshot(&response)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio;
+
+    #[tokio::test]
+    async fn test_get_order_book() {
+        let client = OKXRestClient::new("https://www.okx.com");
+        match client.get_order_book("BTC-USDT").await {
+            Ok(orderbook) => {
+                assert!(!orderbook.asks.is_empty());
+                assert!(!orderbook.bids.is_empty());
+            },
+            Err(e) => eprintln!("Error: {}", e),
+        }
+    }
+}
