@@ -1,3 +1,8 @@
+## How to run 
+```bash
+cargo run --bin okx_demo
+```
+
 ## 1. Requirements Analysis
 
 ### Key Requirements:
